@@ -138,6 +138,7 @@ func splitInternal(n *rtNode) *rtNode {
 			a.box = a.box.Union(c.box)
 		} else {
 			b.children = append(b.children, c)
+			b.box = b.box.Union(c.box)
 		}
 	}
 	*n = *a
