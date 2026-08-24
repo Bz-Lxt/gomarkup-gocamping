@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gocamping
+      POSTGRES_PASSWORD: gocamping
+      POSTGRES_DB: gocamping
+      TZ: Asia/Shanghai
+    ports:
+      - "28314:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gocamping -d gocamping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "28315:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      TZ: Asia/Shanghai
+      APP_ENV: production
+      HTTP_ADDR: :8080
+      DATABASE_URL: postgres://gocamping:gocamping@postgres:5432/gocamping?sslmode=disable
+      REDIS_ADDR: redis:6379
+      JWT_SECRET: gocamping-dev-secret-change-me
+      TILE_PROVIDER: local
+      DEM_PROVIDER: synthetic
+      GPS_PROVIDER: simulator
+      NOTIFY_PROVIDER: mock
+      CORS_ORIGINS: http://localhost:28311,http://localhost:28312
+      LOG_LEVEL: info
+    ports:
+      - "28313:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  frontend-user:
+    build:
+      context: ./frontend-user
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: /api
+        VITE_WS_BASE: /api/v1/ws
+        VITE_TILE_URL: /tiles/{z}/{x}/{y}.png
+    ports:
+      - "28311:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend-admin:
+    build:
+      context: ./frontend-admin
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: /api
+    ports:
+      - "28312:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
