@@ -13,6 +13,7 @@ import (
 	"gocamping/internal/eta"
 	"gocamping/internal/geo"
 	"gocamping/internal/httpx"
+	"gocamping/internal/logger"
 	"gocamping/internal/model"
 	"gocamping/internal/notify"
 	"gocamping/internal/repo"
@@ -31,7 +32,7 @@ type App struct {
 	Trips   *repo.TripRepo
 	Tracks  *repo.TrackRepo
 	SOS     *repo.SOSRepo
-	Risks   *repo.RiskRepo
+	Risks   RiskStore
 	DEM     dem.Provider
 	Notify  notify.Provider
 	Hub     *ws.Hub
@@ -39,6 +40,13 @@ type App struct {
 	Redis   *redis.Client
 	PosHz   *ws.Throttle
 	RiskHz  *risk.Throttle
+}
+
+// RiskStore is the write-side abstraction for risk reports. It is satisfied by
+// *repo.RiskRepo and by test doubles, allowing the service layer to be tested
+// without a live PostgreSQL connection.
+type RiskStore interface {
+	Save(ctx context.Context, rep *model.RiskReport) error
 }
 
 func (a *App) SaveRoute(ctx context.Context, owner int64, in *model.RouteBook) (*model.RouteBook, error) {
@@ -405,12 +413,23 @@ func (a *App) maybeRisk(ctx context.Context, tr *model.Trip, team *model.Team) {
 	if !a.RiskHz.Allow(tr.ID, time.Now()) {
 		return
 	}
+	// Detach from the request context so risk INSERT and downstream auto-SOS
+	// survive after the HTTP response is written. The request context is
+	// canceled once PostPosition returns, which would otherwise abort an
+	// in-flight risk_reports INSERT (context canceled).
+	bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	go func() {
-		bg := ctx
+		defer cancel()
 		rep, err := a.evalRisk(bg, tr, team)
-		if err != nil || rep == nil {
+		if err != nil {
+			logger.Error("risk eval failed", "trip_id", tr.ID, "err", err)
 			return
 		}
+		if rep == nil {
+			return
+		}
+		// Broadcast only after the snapshot is durably persisted, so that
+		// subscribers never receive a risk message without a matching row.
 		a.Hub.Broadcast(tr.ID, ws.TypeRisk, rep)
 		ids := make([]int64, 0)
 		pts := make([][2]float64, 0)
@@ -465,7 +484,9 @@ func (a *App) evalRisk(ctx context.Context, tr *model.Trip, team *model.Team) (*
 	}
 	rep := risk.Evaluate(clat, clon, members, dangers, waters, timeutil.Now())
 	rep.TripID = tr.ID
-	_ = a.Risks.Save(ctx, &rep)
+	if err := a.Risks.Save(ctx, &rep); err != nil {
+		return nil, fmt.Errorf("save risk report: %w", err)
+	}
 	return &rep, nil
 }
 
