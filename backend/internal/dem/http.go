@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -46,30 +47,42 @@ func (h *HTTP) Lookup(ctx context.Context, pts [][2]float64) ([]Sample, error) {
 		return []Sample{}, nil
 	}
 	const chunk = 80
-	type result struct {
+
+	// Pre-slice into batches so each goroutine writes into its own fixed
+	// index slot.  We keep the calls parallel but assemble the final
+	// output in the original route order, independent of which batch
+	// finishes first.  A supplier-side latency wobble (e.g. batch 2
+	// completing ~280 ms before batch 1) must not reorder samples.
+	batches := 0
+	type slot struct {
 		samples []Sample
 		err     error
 	}
-	results := make(chan result, (len(pts)+chunk-1)/chunk)
-	batches := 0
+	slots := make([]slot, (len(pts)+chunk-1)/chunk)
+	var wg sync.WaitGroup
 	for i := 0; i < len(pts); i += chunk {
 		j := i + chunk
 		if j > len(pts) {
 			j = len(pts)
 		}
+		idx := batches
 		batches++
-		go func(batch [][2]float64) {
+		wg.Add(1)
+		go func(idx int, batch [][2]float64) {
+			defer wg.Done()
 			part, err := h.lookupOnce(ctx, batch)
-			results <- result{samples: part, err: err}
-		}(pts[i:j])
+			slots[idx].samples = part
+			slots[idx].err = err
+		}(idx, pts[i:j])
 	}
+	wg.Wait()
+
 	out := make([]Sample, 0, len(pts))
 	for i := 0; i < batches; i++ {
-		res := <-results
-		if res.err != nil {
-			return nil, res.err
+		if slots[i].err != nil {
+			return nil, slots[i].err
 		}
-		out = append(out, res.samples...)
+		out = append(out, slots[i].samples...)
 	}
 	return out, nil
 }
