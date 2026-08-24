@@ -26,13 +26,16 @@ func Build(pts []model.TrackPoint, step time.Duration) []Frame {
 	latest := map[int64]model.TrackPoint{}
 	idx := 0
 	var frames []Frame
-	var fixes []model.LivePosition
 	for t := start; !t.After(end); t = t.Add(step) {
 		for idx < len(pts) && !pts[idx].RecordedAt.After(t) {
 			latest[pts[idx].MemberID] = pts[idx]
 			idx++
 		}
-		fixes = fixes[:0]
+		// Allocate a fresh slice for each frame. Reusing one backing array
+		// across frames would leave every Frame.Fixes pointing at the same
+		// memory, so later writes would silently overwrite earlier frames'
+		// positions (the "jump to the finish line" bug).
+		fixes := make([]model.LivePosition, 0, len(latest))
 		for _, p := range latest {
 			e := 0.0
 			if p.Elevation != nil {
